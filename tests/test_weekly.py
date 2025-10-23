@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from withings2weeks.cli import _read_withings_csv, _daily_averages, _weekly_averages
+from withings2weeks.cli import _daily_averages, _read_withings_csv, _weekly_averages
 
 
 def test_weekly_aggregation(tmp_path: Path) -> None:
