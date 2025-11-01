@@ -59,7 +59,7 @@ def _normalize_timestamp(ts: int) -> datetime:
 
 def _decode_measure(value: int, unit: int) -> float:
     # Real value is value * 10^unit
-    return value * (10**unit)
+    return value * (10**unit)  # type: ignore[no-any-return]  # mypy pow?
 
 
 def _transform_measure_groups(groups: Sequence[dict[str, Any]]) -> pd.DataFrame:
@@ -134,11 +134,11 @@ def fetch_scale_measurements(
     if isinstance(start, date) and not isinstance(start, datetime):
         start_dt = datetime.combine(start, datetime.min.time())
     else:
-        start_dt = start  # type: ignore[assignment]
+        start_dt = start
     if isinstance(end, date) and not isinstance(end, datetime):
         end_dt = datetime.combine(end, datetime.max.time())
     else:
-        end_dt = end  # type: ignore[assignment]
+        end_dt = end
 
     types_list = list(meastypes) if meastypes is not None else MeasureType.scale_types()
     types_param = ",".join(str(int(t)) for t in types_list)
