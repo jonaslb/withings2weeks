@@ -16,6 +16,7 @@ import pandas as pd
 import requests
 
 from .oauth_client import WithingsOAuthClient
+from .weeks import WeekRange
 
 MEASURE_ENDPOINT = "https://wbsapi.withings.net/measure"
 
@@ -239,14 +240,22 @@ __all__ = [
 ]
 
 
-def pivot_scale_measurements_weekly(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate raw scale measurement DataFrame into weekly averages.
+def pivot_scale_measurements_weekly(
+    df: pd.DataFrame, *, week_range: WeekRange | None = None
+) -> pd.DataFrame:
+    """Select each day's lightest measurement, then weight daily rows within weeks.
 
-    Expects columns:
-      timestamp, weight_kg, muscle_mass_kg, hydration_kg, fat_mass_kg, bone_mass_kg
-    Missing columns are filled with NaN.
-    Returns DataFrame with columns required by ODS export logic:
-      Week number, Weight (kg), Muscle mass (kg), Hydration (kg), Fat mass (kg), Bone mass (kg)
+    A daily row's weight is 2 ** (-(weight_kg - weekly_minimum) / 2): each
+    additional 2 kg halves its influence on every component. Ties within a day
+    select the earliest timestamp (then input order). Rows without a finite,
+    positive total weight cannot be selected. Missing components are excluded
+    independently from their weighted denominators, never filled from other rows.
+
+    Emit every ISO week in week_range, filtering to its [start, end) boundaries;
+    otherwise emit all weeks between the first and last valid timestamps.
+    Empty weeks/components are NaN, exported as blank spreadsheet cells.
+    Naive input timestamps are treated as UTC. Calendar days use the range's
+    timezone, or UTC if no aware range is supplied.
     """
     value_cols = {
         "weight_kg": "Weight (kg)",
@@ -255,43 +264,50 @@ def pivot_scale_measurements_weekly(df: pd.DataFrame) -> pd.DataFrame:
         "fat_mass_kg": "Fat mass (kg)",
         "bone_mass_kg": "Bone mass (kg)",
     }
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "Week number",
-                *value_cols.values(),
-            ]
-        )
-    df = (
-        df.assign(timestamp=lambda df: pd.to_datetime(df["timestamp"], errors="coerce"))
-        .dropna(subset=["timestamp"])
-        .rename(
-            columns=value_cols,
-        )
+    df = df.reindex(columns=["timestamp", *value_cols]).copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    if week_range is not None:
+        tz = week_range.start.tzinfo or UTC
+        start = pd.Timestamp(week_range.start)
+        end = pd.Timestamp(week_range.end)
+        if start.tzinfo is None:
+            start = start.tz_localize(tz)
+        if end.tzinfo is None:
+            end = end.tz_localize(tz)
+        if end <= start:
+            raise ValueError("Week range end must be after its start")
+        df["timestamp"] = df["timestamp"].dt.tz_convert(tz)
+        df = df[(df["timestamp"] >= start) & (df["timestamp"] < end)]
+        mondays = pd.date_range(start, end, freq="W-MON", inclusive="left")
+    elif not df.empty:
+        start = df["timestamp"].min().normalize()
+        start -= pd.Timedelta(days=start.dayofweek)
+        mondays = pd.date_range(start, df["timestamp"].max(), freq="W-MON")
+    else:
+        return pd.DataFrame(columns=["Week number", *value_cols.values()])
+    weeks = pd.Index(mondays.strftime("%GW%V"), name="Week number")
+
+    df[list(value_cols)] = (
+        df[list(value_cols)]
+        .apply(pd.to_numeric, errors="coerce")
+        .replace([float("inf"), -float("inf")], float("nan"))
     )
-    # Build daily averages first
-    df = (
-        df
-        # Daily averages
-        .assign(date=lambda df: df["timestamp"].dt.date)
-        .groupby("date", as_index=False)
-        .mean(numeric_only=True)
+    df = df[df["weight_kg"].notna() & (df["weight_kg"] > 0)]
+    daily = (
+        df.assign(date=df["timestamp"].dt.date)
+        .sort_values("timestamp", kind="stable")
+        .sort_values("weight_kg", kind="stable")
+        .drop_duplicates("date", keep="first")
     )
-    df = (
-        df.assign(date=lambda df: pd.to_datetime(df["date"], errors="coerce"))
-        # Weekly aggregation (ISO weeks)
-        .assign(
-            **{
-                "Week number": lambda df: df["date"].dt.isocalendar().year.astype(str)
-                + "W"
-                + df["date"].dt.isocalendar().week.astype(str).str.zfill(2)
-            }
-        )
-        .groupby("Week number", as_index=False)
-        .mean(numeric_only=True)
-    )
-    # Column ordering
-    return df[["Week number"] + list(value_cols.values())]
+    week_ids = daily["timestamp"].dt.strftime("%GW%V").rename("Week number")
+    minimum = daily.groupby(week_ids)["weight_kg"].transform("min")
+    weights = 2.0 ** (-(daily["weight_kg"] - minimum) / 2.0)
+    values = daily[list(value_cols)]
+    numerator = values.mul(weights, axis=0).groupby(week_ids).sum(min_count=1)
+    denominator = values.notna().mul(weights, axis=0).groupby(week_ids).sum()
+    weekly = numerator / denominator.replace(0, float("nan"))
+    return weekly.reindex(weeks).rename(columns=value_cols).reset_index()
 
 
 __all__.append("pivot_scale_measurements_weekly")

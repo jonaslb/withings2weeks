@@ -1,6 +1,6 @@
 # withings2weeks: Your Withings Data Week-by-Week
 
-**Turn your Withings scale measurements into clear, weekly insights. This CLI tool aggregates your weight, muscle mass, and other metrics into a simple weekly average, perfect for tracking long-term trends.**
+**Turn your Withings scale measurements into weekly summaries. This CLI tool aggregates your weight, muscle mass, and other metrics into a lower-weight-preferring weekly average for tracking long-term trends.**
 
 `withings2weeks` can fetch data directly from the Withings API or use a local data export. It then pivots the measurements into weekly averages and saves them as an OpenDocument Spreadsheet (`.ods`) or prints them to your terminal.
 
@@ -15,7 +15,8 @@ This should be a superior experience to the limited Withings app and webpage.
 ## Features
 
 *   **Interactive OAuth2 flow:** Securely authorize with the Withings API.
-*   **Weekly Averaging:** First averages within each day, then averages over the week.
+*   **Weekly Averaging:** Selects each day's lowest-weight measurement, then computes weighted weekly averages that reduce the influence of higher-weight readings.
+*   **Complete Week Range:** Includes every requested week, with blank values when there are no usable measurements.
 *   **ODS Export:** Saves to an `.ods` file by default (spreadsheet).
 
 ## Installation
@@ -55,6 +56,18 @@ uv tool install https://github.com/jonaslb/withings2weeks
 *   `--output-path PATH`: Specify an output path for the spreadsheet.
 *   `--stdout`: Print the results to the terminal instead of saving to a file.
 *   `--overwrite`: Allow overwriting an existing output file.
+*   `--file-source PATH`: Use a Withings CSV export instead of the API, filtered to the same requested week range.
+
+### Aggregation Algorithm
+
+1. Select the complete measurement row with the lowest total weight on each calendar day. Ties select the earliest timestamp, then the first input row. Components always come from that same row; they are not minimized independently.
+2. Within each ISO week (Monday-Sunday), let `m` be the lowest selected daily weight. Assign each daily row the coefficient `a = 2 ** (-(weight_kg - m) / 2)`. The minimum gets 1; +2 kg gets 0.5; +3 kg gets about 0.354; +4 kg gets 0.25.
+3. For each metric, calculate `sum(a * value) / sum(a)`, using only selected rows where that metric is present. All metrics use the same row coefficients, but missing components have their own denominators. A day contributes at most one row, regardless of the number of weigh-ins.
+4. Emit every week from the requested start through the inclusive end week. With no end specified, stop at the last completed week. Missing weeks and components are blank in ODS and terminal output; no interpolation or zero-filling is performed.
+
+Rows with invalid timestamps or missing, non-finite, or non-positive total weights cannot contribute. Missing/non-finite components are excluded individually. API timestamps are UTC; timezone-naive CSV timestamps are also interpreted as UTC. For CLI output, timestamps are converted to the machine's current local timezone offset before date/week grouping, matching the range boundaries (this offset does not encode historical daylight-saving changes). Direct aggregation without an explicit range uses UTC and fills gaps between the first and last valid timestamps. Calculations retain full precision; terminal values show two decimals.
+
+The fixed 2 kg half-weight distance is a heuristic for suspected upward scale-placement errors, not a calibrated probability or inverse-variance weight. It also downweights genuine higher-weight days and favors spuriously low readings. Taking more readings can lower a day's selected minimum even without a real change. Weights reset each week, so there is no cross-week smoothing, and a placement offset affecting every reading equally is not corrected. Shared component coefficients do not correct hydration-related body-composition errors.
 
 ### Output Columns
 The output will contain the following columns with weekly averaged data:

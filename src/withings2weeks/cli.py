@@ -59,29 +59,6 @@ def _read_withings_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def _daily_averages(df: pd.DataFrame) -> pd.DataFrame:
-    """Group by calendar day (date only) and average numeric columns."""
-    return (
-        df.assign(Date=df["Date"].dt.date).groupby("Date", as_index=False).mean(numeric_only=True)
-    )
-
-
-def _weekly_averages(daily_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate daily averages into ISO week averages."""
-    temp = daily_df.assign(Date=pd.to_datetime(daily_df["Date"]))
-    # Use ISO week (ISO year + week). Period frequency (e.g. W-MON) may differ from ISO,
-    # so rely on isocalendar for canonical ISO week/year info.
-    iso = temp["Date"].dt.isocalendar()
-    week_id = iso["year"].astype(str) + "W" + iso["week"].astype(str).str.zfill(2)
-    numeric_cols = [c for c in daily_df.columns if c != "Date"]
-    return (
-        temp.assign(Week=week_id)
-        .groupby("Week", as_index=False)[numeric_cols]
-        .mean(numeric_only=True)
-        .rename(columns={"Week": "Week number"})
-    )
-
-
 def _derive_output_path(input_path: Path) -> Path:
     """Return output path with -pivot.ods suffix next to input file."""
     return input_path.with_suffix("").with_name(f"{input_path.stem}-pivot.ods")
@@ -100,7 +77,7 @@ def _write_ods(df: pd.DataFrame, out_path: Path) -> None:
     df = df[columns]
     try:
         with pd.ExcelWriter(out_path, engine="odf") as writer:
-            df.to_excel(writer, index=False, sheet_name="Weekly Averages")
+            df.to_excel(writer, index=False, sheet_name="Weekly Averages", na_rep="")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Failed to write ODS file '{out_path}': {e}") from e
 
@@ -135,10 +112,8 @@ def fetch_measures(
 ) -> None:  # noqa: D401
     """Fetch scale measurements OR pivot a local Withings CSV export.
 
-    When ``--file-source`` is provided, ``week`` / ``end_week`` are ignored and the
-    CSV is pivoted (daily then weekly averages) reusing legacy logic.
-    Otherwise, hits the Withings API to fetch raw measurements for the resolved
-    ISO week range and pivots those.
+    Both sources use the requested ISO week range, including empty weeks, and
+    lowest-weight daily rows followed by lower-weight-preferring weekly averages.
     """
     local_tz = datetime.now().astimezone().tzinfo
     week_range = resolve_week_range(week, end_week=end_week, now=datetime.now(), tz=local_tz)
@@ -166,32 +141,23 @@ def fetch_measures(
                 "bone_mass_kg",
             ]
         ]
-        # Ensure expected columns even if missing (defensive)
-        for col in ["weight_kg", "muscle_mass_kg", "hydration_kg", "fat_mass_kg", "bone_mass_kg"]:
-            if col not in raw_df.columns:
-                raw_df[col] = pd.NA
-        # Date filtering (inclusive start, exclusive end boundary)
-        raw_df = raw_df[(raw_df["timestamp"] >= start_date) & (raw_df["timestamp"] < end_date)]
         if output_path is None and not stdout:
             output_path = _derive_output_path(file_source)
     else:
         client = WithingsOAuthClient.from_config()
         raw_df = fetch_scale_measurements_all(client, start=start_date, end=end_date)
-        # Filter again defensively if API returns out-of-range (shouldn't normally)
-        if not raw_df.empty:
-            raw_df = raw_df[(raw_df["timestamp"] >= start_date) & (raw_df["timestamp"] < end_date)]
         if output_path is None and not stdout:
             output_path = Path(
                 f"withings-measures-{week_range.start_week_code}-{week_range.end_week_code}-pivot.ods"
             )
 
-    weekly_df = pivot_scale_measurements_weekly(raw_df)
+    weekly_df = pivot_scale_measurements_weekly(raw_df, week_range=week_range)
 
     if stdout:
         if output_path is not None:
             raise SystemExit("--stdout cannot be combined with --output-path")
         # TODO: Should we give pandas the terminal width if we can?
-        print(weekly_df.to_string(index=False, float_format="%.2f"))
+        print(weekly_df.to_string(index=False, float_format="%.2f", na_rep=""))
         return
 
     if output_path is None:
